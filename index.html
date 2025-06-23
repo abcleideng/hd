@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <title>多人数分组号码出现次数统计（多选合并统计）</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 10px; }
+        textarea { width: 100%; height: 120px; font-size: 16px; }
+        input[type="number"] { width: 80px; font-size: 16px; }
+        button, select { margin: 10px 5px 10px 0; padding: 8px 20px; font-size: 16px; }
+        .group { margin-bottom: 14px; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+        .user { font-weight: bold; }
+        .nums-row { margin: 3px 0; font-size: 15px; }
+        .label { display: inline-block; width: 40px; font-size: 13px; color: #888; vertical-align: top;}
+        .num { display: inline-block; width: 28px; text-align: center; margin: 1px; border-radius: 3px; font-size: 14px; vertical-align: top;}
+        #result { margin-bottom: 60px; }
+        .stat-board { background: #f7f7f7; border: 1px solid #ccc; border-radius: 6px; padding: 10px; margin-bottom: 18px; }
+        .stat-title { color: #0070c9; font-weight: bold; margin-bottom: 6px; }
+        .sum-board { background: #e6f7ff; border: 1px solid #91d5ff; border-radius: 6px; padding: 10px; margin-bottom: 18px; }
+        .sum-title { color: #1890ff; font-weight: bold; margin-bottom: 6px; }
+        .group-title { color: #0070c9; font-size: 15px; margin-bottom: 2px; }
+    </style>
+</head>
+<body>
+    <h3>多人数分组号码出现次数统计（多选合并统计）</h3>
+    <p>粘贴用户数据（用户名在前，12码在后）</p>
+    <textarea id="input"></textarea>
+    <br>
+    <label>生成组数：</label>
+    <input type="number" id="groupCount" value="1000" min="1" max="10000">
+    <div>
+        <label><input type="checkbox" class="sum-check" value="2" checked>2人一组</label>
+        <label><input type="checkbox" class="sum-check" value="3" checked>3人一组</label>
+        <label><input type="checkbox" class="sum-check" value="4" checked>4人一组</label>
+        <label><input type="checkbox" class="sum-check" value="5" checked>5人一组</label>
+        <label><input type="checkbox" class="sum-check" value="6" checked>6人一组</label>
+        <button onclick="process()">生成分组</button>
+    </div>
+    <div id="result">
+        <div id="sum-stat"></div>
+        <div id="static-content"></div>
+    </div>
+
+    <script>
+    let allStats = {}; // {2: {zeroStat:[], groups:[]}, ...}
+    let allGroupsHtml = {}; // {2: html, 3: html, ...}
+
+function parseUsers(raw) {
+    const lines = raw.split('\n');
+    const users = [];
+    let bufferNums = [];
+    let bufferName = null;
+
+    function pushBuffer() {
+        if (bufferName && bufferNums.length) {
+            users.push({
+                name: bufferName,
+                nums: Array.from(new Set(bufferNums.filter(n => +n >= 1 && +n <= 49).map(Number)))
+            });
+        }
+        bufferNums = [];
+        bufferName = null;
+    }
+
+    for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+
+        // 1. 识别“https://t.me/xxx 用户名, [时间]”格式
+        let tgMatch = line.match(/^https?:\/\/t\.me\/\S+\s+([^,，]+),\s*\[\d{4}年\d{1,2}月\d{1,2}日.*?\]/);
+        if (tgMatch) {
+            pushBuffer();
+            bufferName = tgMatch[1].trim();
+            continue;
+        }
+
+        // 2. 识别“https://t.me/xxx 用户名,”格式（有些没有时间）
+        let tgMatch2 = line.match(/^https?:\/\/t\.me\/\S+\s+([^,，]+),/);
+        if (tgMatch2) {
+            pushBuffer();
+            bufferName = tgMatch2[1].trim();
+            continue;
+        }
+
+        // 3. 用户名行（如“王 王:”）
+        if (/[:：]$/.test(line)) {
+            pushBuffer();
+            bufferName = line.replace(/[:：]$/, '').trim();
+            continue;
+        }
+
+        // 4. 兼容“用户名: 新澳12码...”一行
+        let userAndNum = line.match(/^(.+?)[:：]\s*(新澳\s*\d{0,3}\s*期)?\s*(新澳\s*12\s*码|新奥\s*12\s*码|12\s*码|蓝\d*码)[：:\s\-]*([\d\D]+)?$/i);
+        if (userAndNum) {
+            pushBuffer();
+            bufferName = userAndNum[1].replace(/[\[\]【】,，。:：\s]+$/g, '').trim() || '匿名';
+            if (userAndNum[4]) {
+                let nums = userAndNum[4].match(/\d{1,2}/g);
+                if (nums) bufferNums.push(...nums);
+            }
+            continue;
+        }
+
+        // 5. 识别“新澳12码”、“新澳 12 码”、“12码”、“12码:”、“新澳12码：”、“蓝12码”等各种前缀
+        let match = line.match(/^(.*?)(新澳\s*12\s*码|新奥\s*12\s*码|12\s*码|蓝\d*码)[：:\s\-]*([\d\D]+)?$/i);
+        if (match) {
+            // 如果前面是“新澳xxx期”或为空，则用上一个用户名
+            let possibleName = match[1].replace(/[\[\]【】,，。:：\s]+$/g, '').trim();
+            if (possibleName && !/^(新澳|新奥)?\d{0,3}期$/i.test(possibleName)) {
+                pushBuffer();
+                bufferName = possibleName;
+            } else if (!bufferName) {
+                bufferName = '匿名';
+            }
+            if (match[3]) {
+                let nums = match[3].match(/\d{1,2}/g);
+                if (nums) bufferNums.push(...nums);
+            }
+            continue;
+        }
+
+        // 6. 识别“期12码”紧凑格式（如“新澳173期12码1.2.3...”）
+        match = line.match(/^(.*?期)?\s*12\s*码[：:\s\-]*([\d\D]+)$/i);
+        if (match) {
+            let possibleName = (match[1] || '').replace(/[\[\]【】,，。:：\s]+$/g, '').trim();
+            if (possibleName && !/^(新澳|新奥)?\d{0,3}期$/i.test(possibleName)) {
+                pushBuffer();
+                bufferName = possibleName;
+            } else if (!bufferName) {
+                bufferName = '匿名';
+            }
+            if (match[2]) {
+                let nums = match[2].match(/\d{1,2}/g);
+                if (nums) bufferNums.push(...nums);
+            }
+            continue;
+        }
+
+        // 7. 识别“主1码xx”或其它干扰信息，去掉
+        if (/主\d+码/.test(line)) continue;
+
+        // 8. 识别“新澳xxx期”单独一行，不切换用户名
+        if (/^(新澳|新奥)?\d{0,3}期$/i.test(line)) continue;
+
+        // 9. 纯号码行（如“06.08.10.11.21.23.28.34.39.40.43.45”）
+        let nums = line.match(/\d{1,2}/g);
+        if (nums && bufferName) {
+            bufferNums.push(...nums);
+        }
+    }
+    pushBuffer();
+    users.forEach(u => u.nums = Array.from(new Set(u.nums.map(Number))));
+    return users.filter(u => u.nums && u.nums.length > 0);
+}
+
+    function randomGroups(users, groupSize, count) {
+        const groups = [];
+        const userCount = users.length;
+        for (let i = 0; i < count; i++) {
+            let idxArr = [];
+            while (idxArr.length < groupSize) {
+                let idx = Math.floor(Math.random() * userCount);
+                if (!idxArr.includes(idx) || userCount < groupSize) {
+                    idxArr.push(idx);
+                }
+            }
+            groups.push(idxArr.map(idx => users[idx]));
+        }
+        return groups;
+    }
+
+    function formatStat(zeroStat, groupCount, groupSize) {
+        let countMap = {};
+        for (let n = 1; n <= 49; n++) {
+            let c = zeroStat[n];
+            if (!countMap[c]) countMap[c] = [];
+            countMap[c].push(n < 10 ? '0'+n : ''+n);
+        }
+        return `<div class="stat-board">
+            <div class="stat-title">0次号码统计（${groupCount}组，每组${groupSize}人，每个号码出现为0次的次数，格式化分组）</div>
+            <pre style="font-size:15px;line-height:1.8;">${
+                Object.keys(countMap).sort((a,b)=>b-a).map(cnt=>{
+                    let nums = countMap[cnt].join(' ');
+                    return `〖${cnt}次〗${nums}（共计${countMap[cnt].length}个）`;
+                }).join('\n')
+            }</pre>
+        </div>`;
+    }
+
+    function formatSumStat(zeroStat, groupCount, groupSizes) {
+        let countMap = {};
+        for (let n = 1; n <= 49; n++) {
+            let c = zeroStat[n];
+            if (!countMap[c]) countMap[c] = [];
+            countMap[c].push(n < 10 ? '0'+n : ''+n);
+        }
+        return `<div class="sum-board">
+            <div class="sum-title">合并统计（${groupCount}组，${groupSizes.map(n=>n+'人').join('、')}，每个号码出现为0次的次数，格式化分组）</div>
+            <pre style="font-size:15px;line-height:1.8;">${
+                Object.keys(countMap).sort((a,b)=>b-a).map(cnt=>{
+                    let nums = countMap[cnt].join(' ');
+                    return `〖${cnt}次〗${nums}（共计${countMap[cnt].length}个）`;
+                }).join('\n')
+            }</pre>
+        </div>`;
+    }
+
+    function formatGroups(groups, groupSize) {
+        let html = '';
+        groups.forEach((group, idx) => {
+            let count = Array(50).fill(0);
+            group.forEach(u => u.nums.forEach(n => count[n]++));
+            let rows = {};
+            for (let n = 0; n <= groupSize; n++) rows[n] = '';
+            for (let i = 1; i <= 49; i++) {
+                let txt = i < 10 ? '0' + i : '' + i;
+                if (count[i] >= 0 && count[i] <= groupSize) rows[count[i]] += `<span class="num">${txt}</span>`;
+            }
+            let usersStr = group.map(u=>`<span class="user">${u.name}</span>`).join(' & ');
+            html += `<div class="group">
+                <div class="group-title">${groupSize}人组</div>
+                ${usersStr}<br>
+                ${Object.keys(rows).filter(k=>rows[k]).map(k=>`<div class="nums-row"><span class="label">${k}次:</span>${rows[k]}</div>`).join('')}
+            </div>`;
+        });
+        return html;
+    }
+
+   function process() {
+    const raw = document.getElementById('input').value;
+    const users = parseUsers(raw);
+    const groupCount = Math.max(1, Math.min(10000, parseInt(document.getElementById('groupCount').value) || 1000));
+    const groupSizes = [2,3,4,5,6];
+    allStats = {};
+    allGroupsHtml = {};
+    let html = '';
+    // 生成每种分组的统计和分组详情
+    groupSizes.forEach(groupSize=>{
+        if (users.length < groupSize) return;
+        const groups = randomGroups(users, groupSize, groupCount);
+        let zeroStat = Array(50).fill(0);
+        groups.forEach(group => {
+            let count = Array(50).fill(0);
+            group.forEach(u => u.nums.forEach(n => count[n]++));
+            for (let n = 1; n <= 49; n++) {
+                if (count[n] === 0) zeroStat[n]++;
+            }
+        });
+        allStats[groupSize] = {zeroStat, groups};
+        html += formatStat(zeroStat, groups.length, groupSize);
+        allGroupsHtml[groupSize] = formatGroups(groups, groupSize);
+    });
+
+    // 合并统计
+    let checked = Array.from(document.querySelectorAll('.sum-check')).filter(c=>c.checked).map(c=>parseInt(c.value));
+    let sumStat = Array(50).fill(0);
+    let sumCount = 0;
+    let sumGroupSizes = [];
+    checked.forEach(gs=>{
+        if (allStats[gs]) {
+            for (let n = 1; n <= 49; n++) sumStat[n] += allStats[gs].zeroStat[n];
+            sumCount += allStats[gs].groups.length;
+            sumGroupSizes.push(gs);
+        }
+    });
+    let sumHtml = '';
+    if (sumGroupSizes.length) {
+        sumHtml = formatSumStat(sumStat, sumCount, sumGroupSizes);
+    }
+
+    // 只拼接勾选的分组详情
+    let allGroupsDetailHtml = '';
+    checked.forEach(groupSize => {
+        if (allGroupsHtml[groupSize]) {
+            allGroupsDetailHtml += allGroupsHtml[groupSize];
+        }
+    });
+
+    // 渲染
+    document.getElementById('sum-stat').innerHTML = sumHtml;
+    document.getElementById('static-content').innerHTML = html + allGroupsDetailHtml;
+}
+
+// 监听多选框变化，实时刷新合并统计和分组详情
+document.addEventListener('DOMContentLoaded', ()=>{
+    document.querySelectorAll('.sum-check').forEach(cb=>{
+        cb.addEventListener('change', ()=>{
+            // 只刷新合并统计和分组详情
+            let sumStat = Array(50).fill(0);
+            let sumCount = 0;
+            let sumGroupSizes = [];
+            let checked = Array.from(document.querySelectorAll('.sum-check')).filter(c=>c.checked).map(c=>parseInt(c.value));
+            checked.forEach(gs=>{
+                if (allStats[gs]) {
+                    for (let n = 1; n <= 49; n++) sumStat[n] += allStats[gs].zeroStat[n];
+                    sumCount += allStats[gs].groups.length;
+                    sumGroupSizes.push(gs);
+                }
+            });
+            let sumHtml = '';
+            if (sumGroupSizes.length) {
+                sumHtml = formatSumStat(sumStat, sumCount, sumGroupSizes);
+            }
+            // 只拼接勾选的分组详情
+            let allGroupsDetailHtml = '';
+            checked.forEach(groupSize => {
+                if (allGroupsHtml[groupSize]) {
+                    allGroupsDetailHtml += allGroupsHtml[groupSize];
+                }
+            });
+            document.getElementById('sum-stat').innerHTML = sumHtml;
+            document.getElementById('static-content').innerHTML = allGroupsDetailHtml;
+        });
+    });
+});
+    </script>
+</body>
+</html>
